@@ -13,6 +13,7 @@ class App(
     val gateway: MockGateway = MockGateway(),
 ) {
     val inv = Inventory(db, gateway)
+    val incident = Incident(db, inv, gateway)
     val legacy = Legacy(db)
     val shop = Shop(db)
     val load = LoadSim(inv, legacy, db)
@@ -152,6 +153,16 @@ fun Application.module(app: App = App()) {
                 }
             }
 
+            // Waiting room: hanya yang diizinkan yang boleh menyentuh database.
+            if (!inv.admitted(u, cid)) {
+                val pos = inv.queuePosition(u, cid)
+                if (inv.soldOutNow(cid)) return@post call.fail(HttpStatusCode.Conflict, "SOLD_OUT", "Stok promo sudah habis. Kamu tidak dikenai biaya.")
+                return@post call.ok(
+                    obj("state" to "WAITING", "ticket" to "$cid-$u", "position_approx" to pos, "retry_after_sec" to 3),
+                    "Kamu dalam antrean.", HttpStatusCode.Accepted,
+                )
+            }
+
             when (val r = inv.purchase(u, cid, key)) {
                 is Outcome.Ok -> call.ok(orderJson(r.order), "Pesanan dibuat.", if (r.replay) HttpStatusCode.OK else HttpStatusCode.Created)
                 Outcome.SoldOut -> call.fail(HttpStatusCode.Conflict, "SOLD_OUT", "Stok promo sudah habis. Kamu tidak dikenai biaya.")
@@ -160,6 +171,19 @@ fun Application.module(app: App = App()) {
                     .let { JsonObject(it + ("data" to obj("order_id" to r.orderId))) })
                 is Outcome.PaymentUnavailable -> call.fail(HttpStatusCode.ServiceUnavailable, "PAYMENT_UNAVAILABLE", r.message, r.retryable, 2)
             }
+        }
+
+        get("/queue/{ticket}") {
+            val u = call.userId() ?: return@get call.fail(HttpStatusCode.Unauthorized, "UNAUTHORIZED", "Masuk dulu.")
+            val parts = call.parameters["ticket"]!!.split('-')
+            val cid = parts.getOrNull(0)?.toLongOrNull(); val tu = parts.getOrNull(1)?.toLongOrNull()
+            if (cid == null || tu != u) return@get call.fail(HttpStatusCode.NotFound, "NOT_FOUND", "Tiket tidak ditemukan")
+            val state = when {
+                inv.admitted(u, cid) -> "ADMITTED"
+                inv.soldOutNow(cid) -> "REJECTED"
+                else -> "WAITING"
+            }
+            call.ok(obj("state" to state, "position_approx" to inv.queuePosition(u, cid), "retry_after_sec" to 3))
         }
 
         get("/orders") {
@@ -207,10 +231,41 @@ fun Application.module(app: App = App()) {
             call.ok(obj("voided" to n))
         }
 
+        get("/admin/incident/exposure") { call.ok(app.incident.exposure()) }
+        post("/admin/incident/freeze-all") {
+            call.ok(app.incident.freezeAll("ops", call.body().str("reason") ?: "insiden oversell"), "Semua kampanye dijeda.")
+        }
+        get("/admin/campaigns/{id}/compensation-plan") {
+            val q = call.request.queryParameters
+            val plan = app.incident.plan(call.parameters["id"]!!.toLong(), (q["option"] ?: "B").uppercase(), q["voucher"]?.toLong() ?: 50_000, q["seller_pct"]?.toInt() ?: 50)
+            if (plan == null) call.fail(HttpStatusCode.NotFound, "NOT_FOUND", "Kampanye tidak ditemukan") else call.ok(plan)
+        }
+        post("/admin/campaigns/{id}/compensation-execute") {
+            val q = call.request.queryParameters
+            val r = app.incident.execute(call.parameters["id"]!!.toLong(), (q["option"] ?: "B").uppercase(), q["voucher"]?.toLong() ?: 50_000, q["seller_pct"]?.toInt() ?: 50)
+            if (r == null) call.fail(HttpStatusCode.NotFound, "NOT_FOUND", "Kampanye tidak ditemukan") else call.ok(r, "Kompensasi dieksekusi.")
+        }
+
         // ---------- Simulasi (hanya build dev) ----------
+        post("/sim/campaigns") {
+            val q = call.request.queryParameters
+            val n = (q["count"]?.toInt() ?: 800).coerceIn(1, 2000)
+            app.db.tx { c -> for (i in 2L..(n + 1L)) Seed.createCampaign(c, i, "Penjual $i", q["allocation"]?.toInt() ?: 100, 30, 3600) }
+            call.ok(obj("created" to n, "first_id" to 2, "last_id" to n + 1))
+        }
+        post("/sim/incident") {
+            // Reproduksi insiden pada banyak penjual: alur lama ditembak per kampanye, 80% VA dibayar.
+            val q = call.request.queryParameters
+            val campaigns = (q["campaigns"]?.toInt() ?: 50).coerceIn(1, 800); val users = (q["users"]?.toInt() ?: 500).coerceIn(1, 20_000)
+            app.db.tx { c -> for (i in 2L..(campaigns + 1L)) if (c.queryOne("SELECT 1 FROM campaign WHERE id = ?", i) { 1 } == null) Seed.createCampaign(c, i, "Penjual $i", 100, 30, 3600) }
+            for (id in 2L..(campaigns + 1L)) app.load.run("legacy", users, 100, campaignId = id)
+            app.db.conn { c -> c.exec("UPDATE legacy_va SET paid = (MOD(seq, 5) <> 0)") }
+            call.ok(app.incident.exposure(), "Insiden direproduksi pada $campaigns penjual.")
+        }
         post("/sim/gateway") {
             app.gateway.mode = runCatching { GatewayMode.valueOf((call.request.queryParameters["mode"] ?: "ok").uppercase()) }.getOrDefault(GatewayMode.OK)
-            call.ok(obj("mode" to app.gateway.mode.name))
+            call.request.queryParameters["rate"]?.toDoubleOrNull()?.let { app.gateway.failRate = it.coerceIn(0.0, 1.0) }
+            call.ok(obj("mode" to app.gateway.mode.name, "fail_rate" to app.gateway.failRate))
         }
         post("/sim/reset") {
             val q = call.request.queryParameters
@@ -224,7 +279,7 @@ fun Application.module(app: App = App()) {
             val id = call.parameters["orderId"]!!.toLong()
             val behavior = call.request.queryParameters["behavior"] ?: "ok"
             if (behavior == "late") {   // paksa kedaluwarsa dulu agar callback datang terlambat
-                app.db.conn { c -> c.exec("UPDATE orders SET reserved_until = DATEADD('SECOND', -1, CURRENT_TIMESTAMP(3)) WHERE id = ? AND status = 'PENDING_PAYMENT'", id) }
+                app.db.conn { c -> c.exec("UPDATE orders SET reserved_until = ${Sql.dateAdd("SECOND", "-1")} WHERE id = ? AND status = 'PENDING_PAYMENT'", id) }
                 inv.expireDue()
             }
             val ev = app.gateway.pay(id.toString())
@@ -240,8 +295,9 @@ fun Application.module(app: App = App()) {
             val q = call.request.queryParameters
             val users = (q["users"]?.toInt() ?: 20_000).coerceIn(1, 250_000)
             val mode = q["mode"] ?: "safe"
-            val alloc = app.db.conn { c -> c.queryOne("SELECT allocation FROM campaign WHERE id = ?", Seed.CAMPAIGN_ID) { it.getInt(1) } } ?: 100
-            call.ok(app.load.run(mode, users, alloc))
+            val cid = q["campaign"]?.toLongOrNull() ?: Seed.CAMPAIGN_ID
+            val alloc = app.db.conn { c -> c.queryOne("SELECT allocation FROM campaign WHERE id = ?", cid) { it.getInt(1) } } ?: 100
+            call.ok(app.load.run(mode, users, alloc, campaignId = cid, admission = q["admission"] == "true"))
         }
     }
 }

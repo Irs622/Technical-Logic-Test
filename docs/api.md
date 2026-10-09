@@ -125,9 +125,10 @@ Mode ini hanya aktif pada build `debug`/staging dan ditandai jelas di UI ([`DESI
 | Fitur | Status |
 |---|---|
 | `GET /campaigns/{id}`, `POST /campaigns/{id}/purchase`, `GET /orders`, `GET /orders/{id}`, cancel | Ada |
-| Idempotency-Key, 429 + `Retry-After` (10 percobaan/10 detik/pengguna) | Ada |
-| `GET /queue/{ticket}` dan respons `202 QUEUED` (waiting room) | **Belum** — hanya rate limit dan fast-reject "stok habis" |
-| `/internal/payments/callback` (HMAC), `/admin/campaigns/{id}/pause\|resume\|void-excess\|reconciliation` | Ada |
-| `/sim/*`: `reset`, `gateway`, `payments/{id}/pay?behavior=ok\|duplicate\|late\|lost`, `expire`, `reconcile`, `load` | Ada. `POST /campaigns/{id}/purchase?mode=legacy` memakai alur lama (bug) untuk demo |
-| Toko: `GET /products`, `/products/{id}`, `/categories`, `/me`, `POST /me/topup`, `POST /checkout`, `GET /shop/orders` | Ada |
+| Idempotency-Key, 429 + `Retry-After` (10 percobaan/10 detik/pengguna, di memori) | Ada |
+| Waiting room: `202` dengan `ticket` + `GET /queue/{ticket}` (`WAITING`/`ADMITTED`/`REJECTED`) | **Ada** (`Admission.kt`; 5× alokasi, +5 slot per reservasi dilepas) |
+| `/internal/payments/callback` (HMAC), admin `pause\|resume\|void-excess\|reconciliation` | Ada |
+| Admin insiden: `GET /admin/incident/exposure`, `POST /admin/incident/freeze-all`, `GET /admin/campaigns/{id}/compensation-plan?option=A\|B\|C`, `POST .../compensation-execute` | Ada |
+| `/sim/*`: `reset`, `gateway?mode=ok\|fail\|timeout\|flaky&rate=`, `payments/{id}/pay?behavior=ok\|duplicate\|late\|lost`, `expire`, `reconcile`, `load?mode=&users=&admission=true&campaign=`, `campaigns?count=`, `incident?campaigns=&users=` | Ada. `POST /campaigns/{id}/purchase?mode=legacy` memakai alur lama (bug) untuk demo |
+| Toko: `GET /products`, `/products/{id}`, `/categories`, `/me`, `POST /me/topup`, `POST /checkout`, `GET /shop/orders` (termasuk produk gudang Rp1.000.000) | Ada |
 | Auth | Disederhanakan: `Authorization: Bearer demo-<userId>` |

@@ -27,7 +27,7 @@ private fun parseReceipt(o: JsonObject) = Receipt(
     o["items"]!!.jsonArray.map { (it as JsonObject).let { i -> ReceiptItem(i.s("name"), i.i("qty"), i.l("unit_price")) } },
 )
 
-class ShopRepository(val settings: Settings, private val api: Api) {
+class ShopRepository(val settings: AppPrefs, private val api: Api) {
 
     private suspend fun <T> run(parse: (JsonElement) -> T, request: suspend () -> RawResponse): Res<T> =
         try {
@@ -92,6 +92,11 @@ class ShopRepository(val settings: Settings, private val api: Api) {
     /** Simulasi: pelanggan membayar VA lewat gateway tiruan. */
     suspend fun simulatePay(orderId: Long): Res<Unit> = run({ }) { api.call("POST", "/sim/payments/$orderId/pay") }
 
+    suspend fun queueState(ticket: String): Res<QueueState> = run({
+        val o = it.jsonObject
+        QueueState(o.s("state"), o.i("position_approx"), o.i("retry_after_sec"))
+    }) { api.call("GET", "/queue/$ticket") }
+
     suspend fun orderById(id: Long): Res<FlashOrder> = run({ parseOrder(it.jsonObject) }) { api.call("GET", "/orders/$id") }
 
     /**
@@ -107,6 +112,10 @@ class ShopRepository(val settings: Settings, private val api: Api) {
             return PurchaseResult.Unknown("Memeriksa pesananmu…")
         }
         val result: PurchaseResult = when {
+            r.status == 202 -> {
+                val d = r.data as? JsonObject
+                return PurchaseResult.Queued(d?.get("ticket")?.jsonPrimitive?.contentOrNull ?: "", d?.get("position_approx")?.jsonPrimitive?.intOrNull ?: 0, d?.get("retry_after_sec")?.jsonPrimitive?.intOrNull ?: 3)
+            }
             r.success && r.data != null -> PurchaseResult.Reserved(parseOrder(r.data!!.jsonObject))
             r.errorCode == "SOLD_OUT" -> PurchaseResult.SoldOut
             r.errorCode == "ALREADY_PURCHASED" -> PurchaseResult.AlreadyPurchased(((r.data as? JsonObject)?.ln("order_id")))

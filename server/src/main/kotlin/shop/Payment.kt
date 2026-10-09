@@ -8,7 +8,7 @@ import javax.crypto.spec.SecretKeySpec
 class GatewayTimeout : RuntimeException("Gateway timeout")
 class GatewayFailure : RuntimeException("Gateway menolak permintaan")
 
-enum class GatewayMode { OK, FAIL, TIMEOUT }
+enum class GatewayMode { OK, FAIL, TIMEOUT, FLAKY }
 
 data class GatewayVa(
     val orderRef: String,
@@ -36,17 +36,21 @@ object Signature {
  */
 class MockGateway(val secret: String = "dev-secret") {
     @Volatile var mode: GatewayMode = GatewayMode.OK
+    /** Untuk mode FLAKY: peluang gagal. Separuhnya gagal pasti, separuhnya timeout (VA tetap terbentuk). */
+    @Volatile var failRate: Double = 0.3
     private val vas = ConcurrentHashMap<String, GatewayVa>()
     private val seq = java.util.concurrent.atomic.AtomicLong(1000)
 
     /** Idempoten per orderRef: panggilan ulang mengembalikan VA yang sama. */
     fun createVa(orderRef: String, amount: Long, expiresAt: Instant): GatewayVa {
         if (mode == GatewayMode.FAIL) throw GatewayFailure()
+        val roll = if (mode == GatewayMode.FLAKY) java.util.concurrent.ThreadLocalRandom.current().nextDouble() else 1.0
+        if (roll < failRate / 2) throw GatewayFailure()
         val va = vas.computeIfAbsent(orderRef) {
             val n = seq.incrementAndGet()
             GatewayVa(orderRef, "BCA", "80770" + n.toString().padStart(11, '0'), "gw_$n", amount, expiresAt)
         }
-        if (mode == GatewayMode.TIMEOUT) throw GatewayTimeout()
+        if (mode == GatewayMode.TIMEOUT || roll < failRate) throw GatewayTimeout()
         return va
     }
 

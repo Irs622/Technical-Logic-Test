@@ -81,6 +81,17 @@ class FlashViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             var result: PurchaseResult = repo.purchase(CAMPAIGN_ID)
             var attempts = 1
+            // Waiting room: tunggu giliran, lalu beli dengan Idempotency-Key yang sama.
+            var polls = 0
+            while (result is PurchaseResult.Queued && polls < 120) {
+                val q = result as PurchaseResult.Queued
+                _ui.update { it.copy(notice = Notice("Kamu dalam antrean. Perkiraan posisi ${q.position}.", Tone.Info)) }
+                delay(q.retryAfterSec * 1000L)
+                val st = repo.queueState(q.ticket)
+                if (st is Res.Ok && st.value.state == "REJECTED") { result = PurchaseResult.SoldOut; break }
+                if (st is Res.Ok && st.value.state == "ADMITTED") result = repo.purchase(CAMPAIGN_ID)
+                polls++
+            }
             // Hasil belum pasti -> ulangi dengan Idempotency-Key yang sama (aman, tidak membuat order ganda).
             while (result is PurchaseResult.Unknown && attempts < 4) {
                 _ui.update { it.copy(notice = Notice("Memeriksa pesananmu…", Tone.Info)) }
@@ -94,6 +105,7 @@ class FlashViewModel(app: Application) : AndroidViewModel(app) {
                 is PurchaseResult.AlreadyPurchased -> Notice("Kamu sudah punya pesanan untuk promo ini.", Tone.Info)
                 PurchaseResult.CampaignNotActive -> Notice("Promo ini sedang dijeda atau sudah berakhir.", Tone.Warn)
                 is PurchaseResult.RateLimited -> Notice("Terlalu cepat. Coba lagi dalam ${r.retryAfterSec} detik.", Tone.Warn)
+                is PurchaseResult.Queued -> Notice("Antrean masih panjang. Tekan Beli lagi nanti.", Tone.Warn)
                 is PurchaseResult.Unknown -> Notice("Hasil belum pasti. Tekan Beli lagi — pesananmu tidak akan terduplikasi.", Tone.Warn)
                 is PurchaseResult.Failure -> Notice(r.message, Tone.Error)
             }

@@ -11,9 +11,12 @@ class BadItems(msg: String) : RuntimeException(msg)
 class Shop(private val db: Db) {
     private val seq = AtomicLong()
 
-    fun ensureUser(id: Long) = db.conn { c ->
-        c.exec("MERGE INTO users (id, name, balance) KEY (id) VALUES (?, ?, COALESCE((SELECT balance FROM users WHERE id = ?), 1000000))",
-            id, "Pelanggan $id", id)
+    fun ensureUser(id: Long) {
+        db.conn { c ->
+            if (c.queryOne("SELECT 1 FROM users WHERE id = ?", id) { 1 } != null) return@conn
+            try { c.exec("INSERT INTO users (id, name, balance) VALUES (?, ?, 1000000)", id, "Pelanggan $id") }
+            catch (e: java.sql.SQLException) { if (!e.isUniqueViolation()) throw e }   // balapan dua request pertama: abaikan
+        }
     }
 
     private fun productJson(rs: java.sql.ResultSet) = obj(
@@ -26,8 +29,8 @@ class Shop(private val db: Db) {
 
     fun products(category: String?, q: String?): List<JsonObject> = db.conn { c ->
         c.query(
-            """SELECT * FROM products WHERE id < 100
-                 AND (? IS NULL OR category = ?) AND (? IS NULL OR LOWER(name) LIKE ?) ORDER BY id""",
+            """SELECT * FROM products WHERE
+                  (? IS NULL OR category = ?) AND (? IS NULL OR LOWER(name) LIKE ?) ORDER BY id""",
             category, category, q, q?.let { "%${it.lowercase()}%" }, map = ::productJson,
         )
     }
@@ -35,7 +38,7 @@ class Shop(private val db: Db) {
     fun product(id: Long): JsonObject? = db.conn { c -> c.queryOne("SELECT * FROM products WHERE id = ?", id, map = ::productJson) }
 
     fun categories(): List<JsonObject> = db.conn { c ->
-        c.query("SELECT category, COUNT(*) FROM products WHERE id < 100 GROUP BY category ORDER BY category") {
+        c.query("SELECT category, COUNT(*) FROM products GROUP BY category ORDER BY category") {
             obj("name" to it.getString(1), "count" to it.getInt(2))
         }
     }
@@ -58,7 +61,7 @@ class Shop(private val db: Db) {
             db.tx { c ->
                 var subtotal = 0L
                 val lines = merged.map { (pid, qty) ->
-                    val p = c.queryOne("SELECT name, price FROM products WHERE id = ? AND id < 100", pid) { it.getString(1) to it.getLong(2) }
+                    val p = c.queryOne("SELECT name, price FROM products WHERE id = ?", pid) { it.getString(1) to it.getLong(2) }
                         ?: throw BadItems("Produk $pid tidak ditemukan")
                     if (c.exec("UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?", qty, pid, qty) == 0)
                         throw OutOfStock(p.first)

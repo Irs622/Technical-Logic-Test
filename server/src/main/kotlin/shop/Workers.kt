@@ -4,7 +4,7 @@ import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
 
 /** Worker latar: kedaluwarsa reservasi, rekonsiliasi pembayaran, monitor invariant (docs/backend.md A.4-A.5). */
-class Workers(private val inv: Inventory, private val db: Db, private val scope: CoroutineScope) {
+class Workers(private val inv: Inventory, private val db: Db, private val scope: CoroutineScope, private val alerter: Alerter = LogAlerter()) {
     private val log = LoggerFactory.getLogger("workers")
     @Volatile var autoPaused = false
 
@@ -18,7 +18,7 @@ class Workers(private val inv: Inventory, private val db: Db, private val scope:
     fun monitorOnce(): List<String> {
         val v = inv.invariantViolations()
         if (v.isNotEmpty()) {
-            log.error("ALERT invariant dilanggar: {}", v)
+            alerter.alert("Invariant dilanggar, kampanye dijeda otomatis", v)
             db.conn { c -> c.query("SELECT id FROM campaign WHERE status = 'ACTIVE'") { it.getLong(1) } }.forEach {
                 inv.setStatus(it, "PAUSED", "monitor", "auto-pause: ${v.first()}")
                 autoPaused = true

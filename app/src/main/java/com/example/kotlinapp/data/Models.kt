@@ -41,6 +41,8 @@ sealed interface Res<out T> {
 /** Hasil final/non-final dari tombol Beli (docs/backend.md B.2). */
 sealed interface PurchaseResult {
     data class Reserved(val order: FlashOrder) : PurchaseResult
+    /** Masuk waiting room: pantau antrean, lalu ulangi pembelian dengan key yang sama. */
+    data class Queued(val ticket: String, val position: Int, val retryAfterSec: Int) : PurchaseResult
     data object SoldOut : PurchaseResult
     data class AlreadyPurchased(val orderId: Long?) : PurchaseResult
     data object CampaignNotActive : PurchaseResult
@@ -49,3 +51,5 @@ sealed interface PurchaseResult {
     data class Unknown(val message: String) : PurchaseResult
     data class Failure(val message: String) : PurchaseResult
 }
+
+data class QueueState(val state: String, val position: Int, val retryAfterSec: Int)

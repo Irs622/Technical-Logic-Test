@@ -16,7 +16,7 @@ Dua sisi: **server (sumber kebenaran stok & pembayaran)** dan **klien Android (c
 3. Reservasi + pembuatan order + ledger dalam **satu transaksi singkat**.
 4. Panggilan gateway pembayaran **di luar** transaksi; tidak memegang lock baris stok.
 5. Setiap operasi yang bisa diulang (beli, buat VA, callback, lepas reservasi) **idempoten**.
-6. Perubahan status order hanya lewat **compare-and-set** (`UPDATE orders SET status=? WHERE id=? AND status=?`).
+6. Semua jalur mengunci baris `campaign` lebih dulu (`SELECT ... FOR UPDATE`) sebelum menyentuh `orders` agar tidak deadlock; perubahan status hanya lewat **compare-and-set** (`UPDATE orders SET status=? WHERE id=? AND status=?`).
 7. Waktu mengikuti jam DB (`NOW(3)`), bukan jam aplikasi/klien.
 8. Harga di-snapshot ke order saat reservasi.
 
@@ -74,7 +74,7 @@ Pelanggaran → alert on-call + kill switch kampanye. Target deteksi: **< 1 meni
 - Bila terjadi oversell: pause → bulk cancel VA belum bayar di gateway → tahan callback → jalankan prosedur kompensasi.
 
 ### A.7 Pengendalian trafik
-- **Waiting room** sebelum `/purchase`: meloloskan ± 3–5× alokasi, sisanya `202 QUEUED` lalu `409 SOLD_OUT` cepat.
+- **Waiting room** sebelum `/purchase` (**diimplementasikan**, `Admission.kt`): meloloskan 5× alokasi; sisanya `202` lalu `409 SOLD_OUT` cepat. Tiap reservasi yang dilepas membuka 5 slot.
 - **Rate limit:** per user (mis. 3 req/10 detik), per IP/device, per kampanye.
 - Respons stok pada halaman produk dari cache dengan label "perkiraan"; tidak dipakai untuk keputusan.
 

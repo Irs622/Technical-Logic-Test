@@ -8,7 +8,9 @@ import kotlinx.coroutines.SupervisorJob
 
 fun main() {
     val app = App()
-    Workers(app.inv, app.db, CoroutineScope(SupervisorJob() + Dispatchers.Default)).start()
+    val alerter = System.getenv("ALERT_WEBHOOK_URL")?.takeIf { it.isNotBlank() }
+        ?.let { CompositeAlerter(listOf(LogAlerter(), WebhookAlerter(it))) } ?: LogAlerter()
+    Workers(app.inv, app.db, CoroutineScope(SupervisorJob() + Dispatchers.Default), alerter).start()
     embeddedServer(Netty, port = System.getenv("PORT")?.toInt() ?: 8080, host = "0.0.0.0") { module(app) }
         .start(wait = true)
 }

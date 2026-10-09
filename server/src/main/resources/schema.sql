@@ -157,5 +157,20 @@ CREATE TABLE legacy_stock (
 CREATE TABLE legacy_va (
   campaign_id BIGINT NOT NULL,
   user_id     BIGINT NOT NULL,
+  seq         BIGINT NOT NULL,           -- urutan terbit (diisi aplikasi)
+  paid        BOOLEAN NOT NULL DEFAULT FALSE,
   PRIMARY KEY (campaign_id, user_id)
+);
+CREATE INDEX ix_legacy_seq ON legacy_va(campaign_id, seq);
+
+-- Eksekusi kompensasi massal (docs/incident-live-commerce.md opsi A/B/C). Idempoten per (kampanye, pengguna, jenis).
+CREATE TABLE compensations (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  campaign_id BIGINT NOT NULL,
+  user_id     BIGINT NOT NULL,
+  kind        VARCHAR(16) NOT NULL,      -- SUBSIDY | REFUND | VOUCHER | VA_CANCELLED
+  amount      BIGINT NOT NULL,
+  option_code VARCHAR(1) NOT NULL,
+  created_at  TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  CONSTRAINT uq_comp UNIQUE (campaign_id, user_id, kind)
 );

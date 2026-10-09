@@ -44,12 +44,27 @@ private fun mapOrder(rs: java.sql.ResultSet) = OrderRow(
  *  - panggilan gateway di luar transaksi;
  *  - perubahan status lewat compare-and-set.
  */
-class Inventory(val db: Db, val gateway: MockGateway) {
+class Inventory(val db: Db, val gateway: MockGateway, val admission: Admission = Admission()) {
     private val orderSeq = AtomicLong()
     private val soldOutCache = ConcurrentHashMap<Long, Boolean>()
 
     /** Wajib dipanggil setelah Seed.resetCampaign agar cache "habis" tidak basi. */
-    fun resetCaches() { soldOutCache.clear() }
+    fun resetCaches() { soldOutCache.clear(); allocCache.clear(); admission.reset() }
+
+    private val allocCache = ConcurrentHashMap<Long, Int>()
+    fun allocationOf(campaignId: Long): Int = allocCache.computeIfAbsent(campaignId) {
+        db.conn { c -> c.queryOne("SELECT allocation FROM campaign WHERE id = ?", campaignId) { it.getInt(1) } } ?: 0
+    }
+
+    /** Waiting room: apakah pembeli ini boleh menyentuh database sekarang? Pemegang order selalu lolos. */
+    fun admitted(userId: Long, campaignId: Long): Boolean =
+        admission.isAdmitted(campaignId, allocationOf(campaignId), userId)
+
+    fun queuePosition(userId: Long, campaignId: Long) = admission.position(campaignId, allocationOf(campaignId), userId)
+
+    fun soldOutNow(campaignId: Long): Boolean = db.conn { c ->
+        c.queryOne("SELECT reserved + sold >= allocation FROM campaign WHERE id = ?", campaignId) { it.getBoolean(1) }
+    } ?: true
 
     // ---------- Pembelian ----------
 
@@ -97,7 +112,7 @@ class Inventory(val db: Db, val gateway: MockGateway) {
                 }!!
                 val id = c.insertReturningId(
                     """INSERT INTO orders (order_no, user_id, campaign_id, status, unit_price, idempotency_key, reserved_until)
-                       VALUES (?, ?, ?, 'PENDING_PAYMENT', ?, ?, DATEADD('SECOND', ?, CURRENT_TIMESTAMP(3)))""",
+                       VALUES (?, ?, ?, 'PENDING_PAYMENT', ?, ?, ${Sql.dateAdd("SECOND", "?")})""",
                     newOrderNo(), userId, campaignId, cp.first, key, cp.second,
                 )
                 c.exec("INSERT INTO inventory_ledger (order_id, campaign_id, entry_type) VALUES (?, ?, 'RESERVE')", id, campaignId)
@@ -140,7 +155,11 @@ class Inventory(val db: Db, val gateway: MockGateway) {
             gateway.lookup(order.id.toString())
                 ?: return Outcome.PaymentUnavailable(true, "Pembayaran sedang diproses. Coba lagi sebentar.")
         } catch (e: GatewayFailure) {
-            release(order.id, "CANCELLED", "gateway", "VA gagal dibuat")
+            if (release(order.id, "CANCELLED", "gateway", "VA gagal dibuat")) {
+                // Bebaskan idempotency key: percobaan ulang dengan key yang sama harus membuat reservasi BARU,
+                // bukan mengembalikan order yang sudah dibatalkan.
+                db.conn { c -> c.exec("UPDATE orders SET idempotency_key = CONCAT(idempotency_key, '#x', id) WHERE id = ?", order.id) }
+            }
             return Outcome.PaymentUnavailable(true, "Pembayaran sedang tidak tersedia. Tidak ada biaya yang dikenakan.")
         }
         db.conn { c ->
@@ -159,18 +178,28 @@ class Inventory(val db: Db, val gateway: MockGateway) {
 
     /** Lepas reservasi: CAS PENDING_PAYMENT -> [to], ledger RELEASE (sekali), reserved-1. Idempoten. */
     fun release(orderId: Long, to: String, actor: String, reason: String): Boolean {
+        var cidOut = 0L
         val done = db.tx { c ->
+            val cid = c.queryOne("SELECT campaign_id FROM orders WHERE id = ?", orderId) { it.getLong(1) } ?: return@tx false
+            lockCampaign(c, cid)                                     // urutan lock tetap: campaign -> orders
             val n = c.exec("UPDATE orders SET status = ? WHERE id = ? AND status = 'PENDING_PAYMENT'", to, orderId)
             if (n == 0) return@tx false
-            val cid = c.queryOne("SELECT campaign_id FROM orders WHERE id = ?", orderId) { it.getLong(1) }!!
             c.exec("INSERT INTO inventory_ledger (order_id, campaign_id, entry_type) VALUES (?, ?, 'RELEASE')", orderId, cid)
             c.exec("UPDATE campaign SET reserved = reserved - 1 WHERE id = ?", cid)
             event(c, orderId, "PENDING_PAYMENT", to, actor, reason)
+            cidOut = cid
             true
         }
-        if (done) soldOutCache.clear()
+        if (done) { soldOutCache.clear(); admission.onRelease(cidOut) }
         return done
     }
+
+    /** Kunci baris kampanye lebih dulu agar semua jalur memakai urutan lock yang sama (campaign -> orders). */
+    private fun lockCampaign(c: Connection, campaignId: Long) {
+        c.query("SELECT id FROM campaign WHERE id = ? FOR UPDATE", campaignId) { it.getLong(1) }
+    }
+
+    private fun campaignIdOf(orderId: Long): Long = db.conn { c -> c.queryOne("SELECT campaign_id FROM orders WHERE id = ?", orderId) { it.getLong(1) } } ?: 0
 
     fun cancel(userId: Long, orderId: Long): Boolean {
         val o = findById(orderId) ?: return false
@@ -200,6 +229,7 @@ class Inventory(val db: Db, val gateway: MockGateway) {
             }
             val cid = c.queryOne("SELECT campaign_id FROM orders WHERE id = ?", orderId) { it.getLong(1) }
                 ?: return@tx CallbackResult.IGNORED
+            lockCampaign(c, cid)
 
             val n = c.exec("UPDATE orders SET status = 'PAID', paid_at = CURRENT_TIMESTAMP(3) WHERE id = ? AND status = 'PENDING_PAYMENT'", orderId)
             if (n == 1) {
@@ -208,7 +238,7 @@ class Inventory(val db: Db, val gateway: MockGateway) {
                 event(c, orderId, "PENDING_PAYMENT", "PAID", "gateway", null)
                 return@tx CallbackResult.CONFIRMED
             }
-            val status = c.queryOne("SELECT status FROM orders WHERE id = ?", orderId) { it.getString(1) }
+            val status = c.queryOne("SELECT status FROM orders WHERE id = ? FOR UPDATE", orderId) { it.getString(1) }   // baca terbaru, bukan snapshot
             if (status != "EXPIRED") return@tx CallbackResult.IGNORED
 
             // Pembayaran terlambat: pulihkan hanya bila alokasi MASIH tersedia, selain itu refund.
@@ -309,6 +339,7 @@ class Inventory(val db: Db, val gateway: MockGateway) {
     fun voidExcess(campaignId: Long, actor: String, reason: String): Int {
         val voided = ArrayList<Pair<Long, String>>()
         db.tx { c ->
+            lockCampaign(c, campaignId)
             val alloc = c.queryOne("SELECT allocation FROM campaign WHERE id = ?", campaignId) { it.getInt(1) } ?: return@tx
             val active = c.query(
                 "SELECT id, status FROM orders WHERE campaign_id = ? AND status IN ('PENDING_PAYMENT','PAID','FULFILLED') ORDER BY reserved_at, id",
@@ -327,6 +358,30 @@ class Inventory(val db: Db, val gateway: MockGateway) {
                    WHERE id = ?""", campaignId, campaignId, campaignId,
             )
             c.exec("INSERT INTO campaign_audit (campaign_id, action, actor, reason) VALUES (?,?,?,?)", campaignId, "VOID_EXCESS", actor, reason)
+        }
+        voided.filter { it.second != "PENDING_PAYMENT" }.forEach { gateway.refund(it.first.toString()) }
+        gateway.cancelUnpaid(voided.filter { it.second == "PENDING_PAYMENT" }.map { it.first.toString() })
+        return voided.size
+    }
+
+    /** Tandai order tertentu VOIDED (refund bila sudah dibayar, batalkan VA bila belum), lalu perbaiki counter dari kenyataan. */
+    fun voidOrders(campaignId: Long, orderIds: List<Long>, actor: String, reason: String): Int {
+        if (orderIds.isEmpty()) return 0
+        val voided = ArrayList<Pair<Long, String>>()
+        db.tx { c ->
+            lockCampaign(c, campaignId)
+            orderIds.forEach { id ->
+                val st = c.queryOne("SELECT status FROM orders WHERE id = ?", id) { it.getString(1) } ?: return@forEach
+                if (st in setOf("PENDING_PAYMENT", "PAID", "FULFILLED") && c.exec("UPDATE orders SET status = 'VOIDED' WHERE id = ? AND status = ?", id, st) == 1) {
+                    event(c, id, st, "VOIDED", actor, reason); voided += id to st
+                }
+            }
+            c.exec(
+                """UPDATE campaign SET
+                     reserved = (SELECT COUNT(*) FROM orders WHERE campaign_id = ? AND status = 'PENDING_PAYMENT'),
+                     sold = (SELECT COUNT(*) FROM orders WHERE campaign_id = ? AND status IN ('PAID','FULFILLED'))
+                   WHERE id = ?""", campaignId, campaignId, campaignId,
+            )
         }
         voided.filter { it.second != "PENDING_PAYMENT" }.forEach { gateway.refund(it.first.toString()) }
         gateway.cancelUnpaid(voided.filter { it.second == "PENDING_PAYMENT" }.map { it.first.toString() })

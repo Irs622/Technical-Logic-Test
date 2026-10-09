@@ -8,7 +8,7 @@ Dua database dengan peran berbeda:
 
 ## 1. MySQL (Server)
 
-> Implementasi simulasi: `server/src/main/resources/schema.sql` (H2 mode MySQL). Perbedaan dari DDL di bawah: `ENUM` diganti `VARCHAR` + `CHECK`, `active_key` memakai `CASE`. Skema H2 itulah yang diuji; MySQL 8.0.16+ belum.
+> Implementasi simulasi: `server/src/main/resources/schema.sql` (H2 mode MySQL). Perbedaan dari DDL di bawah: `ENUM` diganti `VARCHAR` + `CHECK`, `active_key` memakai `CASE`. Skema ini diuji di H2 **dan MySQL 8.0.46** (`TIMESTAMP(3)` otomatis menjadi `DATETIME(3)` saat `MYSQL_URL` diset). Urutan lock: `campaign` → `orders` → `inventory_ledger`.
 
 ### 1.1 Prinsip
 - Engine InnoDB, MySQL **≥ 8.0.16** agar `CHECK` ditegakkan.

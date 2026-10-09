@@ -19,7 +19,7 @@ class InventoryTest {
         c.queryOne("SELECT reserved, sold FROM campaign WHERE id = 1") { it.getInt(1) to it.getInt(2) }!!
     }
     private fun App.expireNow(orderId: Long) = db.conn { c ->
-        c.exec("UPDATE orders SET reserved_until = DATEADD('SECOND', -1, CURRENT_TIMESTAMP(3)) WHERE id = ?", orderId)
+        c.exec("UPDATE orders SET reserved_until = ${Sql.dateAdd("SECOND", "-1")} WHERE id = ?", orderId)
     }
     private fun App.buy(user: Long, key: String = "k$user") = inv.purchase(user, 1, key)
 
@@ -212,7 +212,7 @@ class InventoryTest {
         // Simulasi korban insiden: order tambahan masuk lewat jalur lama (tanpa alokasi).
         app.db.conn { c ->
             for (u in 3L..5L) c.exec(
-                "INSERT INTO orders (order_no, user_id, campaign_id, status, unit_price, idempotency_key, reserved_until) VALUES (?,?,1,'PENDING_PAYMENT',500000,?,DATEADD('HOUR',1,CURRENT_TIMESTAMP(3)))",
+                "INSERT INTO orders (order_no, user_id, campaign_id, status, unit_price, idempotency_key, reserved_until) VALUES (?,?,1,'PENDING_PAYMENT',500000,?,${Sql.dateAdd("HOUR", "1")})",
                 "X-$u", u, "x$u",
             )
         }

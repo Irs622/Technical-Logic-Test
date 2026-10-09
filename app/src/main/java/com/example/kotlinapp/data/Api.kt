@@ -19,7 +19,7 @@ class RawResponse(val status: Int, val body: JsonObject, val retryAfter: Int?) {
 }
 
 /** Klien HTTP tipis. Timeout wajar (connect 5s, read 10s). Retry TIDAK otomatis di sini: diputuskan pemanggil. */
-class Api(private val settings: Settings) {
+class Api(private val settings: AppPrefs) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).callTimeout(15, TimeUnit.SECONDS)
         .build()

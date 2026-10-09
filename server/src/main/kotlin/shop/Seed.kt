@@ -38,7 +38,7 @@ object Seed {
             "Kopi bubuk halus untuk seduh tubruk, body penuh."),
         // Produk kampanye flash sale (live commerce)
         P(100, "Mesin Espresso Manual 15 Bar", "Elektronik", "1 unit", "Bandung",
-            1_000_000, null, 350, "Mesin espresso manual 15 bar, boiler stainless. Garansi toko 1 tahun."),
+            1_000_000, null, 250, "Mesin espresso manual 15 bar, boiler stainless. Stok gudang dijual dengan harga normal."),
     )
 
     /** Isi data awal. Aman dipanggil pada DB baru. */
@@ -61,15 +61,20 @@ object Seed {
         listOf(
             "DELETE FROM payment_va", "DELETE FROM payment_events", "DELETE FROM inventory_ledger",
             "DELETE FROM order_events", "DELETE FROM orders", "DELETE FROM campaign_audit",
-            "DELETE FROM campaign", "DELETE FROM legacy_va", "DELETE FROM legacy_stock",
+            "DELETE FROM compensations", "DELETE FROM campaign", "DELETE FROM legacy_va", "DELETE FROM legacy_stock",
         ).forEach { c.exec(it) }
+        c.exec("UPDATE products SET stock = 250 WHERE id = 100")
+        createCampaign(c, CAMPAIGN_ID, "Toko Kopi Sudut", allocation, windowMin, paymentWindowSec)
+    }
+
+    fun createCampaign(c: Connection, id: Long, seller: String, allocation: Int, windowMin: Int, paymentWindowSec: Int) {
         c.exec(
             """INSERT INTO campaign (id, product_id, seller_name, promo_price, normal_price, allocation,
                payment_window_sec, status, starts_at, ends_at)
-               VALUES (?, 100, 'Toko Kopi Sudut', 500000, 1000000, ?, ?, 'ACTIVE',
-               DATEADD('MINUTE', -1, CURRENT_TIMESTAMP(3)), DATEADD('MINUTE', ?, CURRENT_TIMESTAMP(3)))""",
-            CAMPAIGN_ID, allocation, paymentWindowSec, windowMin,
+               VALUES (?, 100, ?, 500000, 1000000, ?, ?, 'ACTIVE',
+               ${Sql.dateAdd("MINUTE", "-1")}, ${Sql.dateAdd("MINUTE", "?")})""",
+            id, seller, allocation, paymentWindowSec, windowMin,
         )
-        c.exec("INSERT INTO legacy_stock (campaign_id, allocation, stock) VALUES (?, ?, ?)", CAMPAIGN_ID, allocation, allocation)
+        c.exec("INSERT INTO legacy_stock (campaign_id, allocation, stock) VALUES (?, ?, ?)", id, allocation, allocation)
     }
 }
