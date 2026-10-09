@@ -8,6 +8,7 @@ Jawaban tertulis **dan** simulasi yang bisa dijalankan untuk studi kasus oversel
 | [1. Analisis insiden](#1-analisis-insiden) | Akar masalah, faktor pemicu, mitigasi, jawaban "berhenti di 200?" |
 | [2. Alur pembelian yang seharusnya](#2-alur-pembelian-yang-seharusnya) | Flow, SQL atomik, state machine, kegagalan VA |
 | [3. Desain ulang arsitektur](#3-desain-ulang-arsitektur) | Arsitektur target, prioritas P0–P2 |
+| [Konfigurasi](#konfigurasi) | Variabel environment, parameter simulasi, pengaturan aplikasi Android, Docker MySQL |
 | [Bukti dari simulasi](#bukti-dari-simulasi) | Hasil beban 250.000 pembeli di H2 dan **MySQL 8**, 35 test server + 7 test Android, screenshot emulator |
 | [Fitur penanganan insiden](#fitur-penanganan-insiden-yang-diimplementasikan) | Waiting room, harga normal, 800 penjual, kompensasi massal, alert |
 | [Menjalankan](#menjalankan) | Server, reproduksi insiden, aplikasi Android |
@@ -234,6 +235,98 @@ flowchart TB
 **Syarat rilis fitur flash sale:** concurrency test (≥5.000 request paralel pada alokasi 100 → tepat 100 order aktif), load test ≥3× puncak termasuk gateway timeout, chaos test callback ganda/terlambat, runbook insiden, dan syarat promo yang eksplisit (alokasi, 1 per akun, TTL bayar, hak platform membatalkan order di atas alokasi).
 
 **Di sisi aplikasi:** satu `Idempotency-Key` per niat beli (disimpan sampai hasil final); retry memakai key yang sama; tombol Beli dinonaktifkan saat memproses tetapi server tetap idempoten; countdown memakai waktu server; angka stok ditampilkan sebagai "perkiraan"; hasil dipetakan ke `PurchaseResult` (Reserved / SoldOut / AlreadyPurchased / CampaignNotActive / RateLimited / Unknown / Failure).
+
+---
+
+## Konfigurasi
+
+### Prasyarat
+| Komponen | Versi |
+|---|---|
+| JDK | 17+ (Android Studio menyertakan JBR 21; set `JAVA_HOME`) |
+| Gradle | wrapper 8.7 (`./gradlew`), jangan memakai Gradle 9 sistem |
+| Android | SDK platform 34, build-tools 34, AGP 8.3.2, Kotlin 1.9.24, Compose BOM 2024.05 |
+| Database | H2 (bawaan, tanpa instalasi) atau MySQL 8.0.16+ (wajib ≥ 8.0.16 agar `CHECK` ditegakkan) |
+| Opsional | Docker (MySQL), emulator/perangkat Android (arm64 atau x86_64, API 26+) |
+
+### Variabel environment server
+
+| Variabel | Default | Fungsi |
+|---|---|---|
+| `PORT` | `8080` | Port HTTP server |
+| `MYSQL_URL` | *(kosong → H2 in-memory)* | Bila diisi, server dan test memakai MySQL, mis. `jdbc:mysql://localhost:3307/shop`. Skema dibuat ulang otomatis saat start |
+| `MYSQL_USER` | `root` | User MySQL |
+| `MYSQL_PASSWORD` | *(kosong)* | Password MySQL, hanya bila diperlukan |
+| `ALERT_WEBHOOK_URL` | *(kosong → hanya log)* | Endpoint webhook (JSON `{text, details}`) untuk alert invariant dilanggar |
+| `GATEWAY_CALLBACK_SECRET` | `dev-secret` | Kunci HMAC callback gateway tiruan. **Ganti bila server dapat diakses dari luar mesin lokal** |
+
+Contoh:
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+export PORT=8080
+export ALERT_WEBHOOK_URL=https://hooks.example.com/oncall      # opsional
+export MYSQL_URL=jdbc:mysql://localhost:3307/shop MYSQL_USER=root  # opsional, tanpa ini memakai H2
+./gradlew :server:run
+```
+
+### Parameter yang diatur lewat API (tanpa restart)
+
+| Parameter | Cara mengubah | Default |
+|---|---|---|
+| Alokasi promo | `POST /sim/reset?allocation=100` | 100 |
+| Lama sesi promo | `POST /sim/reset?window_min=30` | 30 menit |
+| Jendela bayar (TTL reservasi = kedaluwarsa VA) | `POST /sim/reset?payment_window_sec=3600` | 3600 detik (kasus asli: 86400) |
+| Perilaku gateway tiruan | `POST /sim/gateway?mode=ok\|fail\|timeout\|flaky&rate=0.3` | `ok`, rate 0,3 |
+| Perilaku pembayaran | `POST /sim/payments/{orderId}/pay?behavior=ok\|duplicate\|late\|lost` | `ok` |
+| Jumlah kampanye / penjual | `POST /sim/campaigns?count=800&allocation=100` | – |
+| Beban uji | `POST /sim/load?mode=safe\|legacy&users=250000&admission=true&campaign=1` | `safe`, 20.000, tanpa waiting room |
+| Opsi kompensasi | `compensation-plan?option=A\|B\|C&voucher=50000&seller_pct=50` | `B`, Rp50.000, 50% |
+
+### Konstanta di kode (ubah lalu build ulang)
+
+| Nilai | Lokasi | Default |
+|---|---|---|
+| Faktor waiting room (pembeli lolos = faktor × alokasi; slot tambahan per reservasi dilepas) | `Admission(factor)` di `Inventory.kt` | 5 |
+| Rate limit pembelian per pengguna | `App.rateLimited` di `Routes.kt` | 10 percobaan / 10 detik |
+| Interval worker kedaluwarsa / rekonsiliasi / monitor invariant | `Workers.start(...)` | 10 dtk / 60 dtk / 5 dtk |
+| Ukuran pool koneksi | `Db(poolSize)` | 32 (H2), 24 (MySQL) |
+| Jeda baca→tulis alur lama (memodelkan latensi) | `Legacy(latencyMs)` | 2 ms |
+| Ongkir reguler / kilat | `Shop.checkout` | Rp12.000 / Rp25.000 |
+| Batas isi ulang saldo | `Shop.topup` | Rp1.000.000 per permintaan |
+
+### MySQL 8 lewat Docker
+
+```bash
+docker run -d --name toko-mysql -e MYSQL_ALLOW_EMPTY_PASSWORD=yes -e MYSQL_DATABASE=shop -p 3307:3306 \
+  mysql:8.0 --max-connections=300 --default-time-zone=+00:00
+export MYSQL_URL=jdbc:mysql://localhost:3307/shop MYSQL_USER=root
+./gradlew :server:test --rerun        # --rerun wajib agar Gradle tidak memakai hasil cache H2
+```
+Kontainer ini sekali pakai dan tanpa password; jangan dipakai di luar mesin lokal. `--max-connections=300` perlu karena tiap test membuat pool baru; `--default-time-zone=+00:00` menyamakan zona waktu dengan JVM (UTC).
+
+### Aplikasi Android
+
+| Pengaturan | Nilai | Keterangan |
+|---|---|---|
+| Alamat server | `http://10.0.2.2:8080` | Default untuk emulator. Ubah di tab **Akun → Alamat server** |
+| HP fisik (USB) | `adb reverse tcp:8080 tcp:8080`, lalu `http://localhost:8080` | Cleartext hanya diizinkan untuk `10.0.2.2`, `localhost`, `127.0.0.1` (`res/xml/network_security_config.xml`); produksi wajib HTTPS |
+| ID pengguna demo | `1` | Ubah di tab **Akun** untuk mencoba pembeli lain; dikirim sebagai `Authorization: Bearer demo-<id>` |
+| minSdk / targetSdk | 26 / 34 | `app/build.gradle.kts` |
+| Timeout jaringan | connect 5 dtk, read 10 dtk, total 15 dtk | `data/Api.kt` |
+| Tema | mengikuti sistem (terang/gelap), tanpa dynamic color | `ui/theme/Theme.kt` |
+
+Menyiapkan emulator (arm64, ruang disk terbatas):
+```bash
+sdkmanager "system-images;android-34;google_apis;arm64-v8a"
+avdmanager create avd -n toko34 -k "system-images;android-34;google_apis;arm64-v8a" -d pixel_6
+# partisi data default 6 GB; kecilkan bila disk sempit
+sed -i '' 's/^disk.dataPartition.size = .*/disk.dataPartition.size = 2147483648/' ~/.android/avd/toko34.avd/config.ini
+emulator -avd toko34 -gpu swiftshader_indirect
+```
+
+### Keamanan konfigurasi
+- Tidak ada rahasia di repo. Kredensial database dan webhook hanya dari environment.
+- Auth simulasi (`Bearer demo-<id>`), `dev-secret`, dan endpoint `/sim/*` + `/admin/*` **tanpa autentikasi** — hanya untuk lokal. Sebelum dipakai di luar itu: autentikasi nyata, peran `ops_admin` untuk `/admin/*`, `/sim/*` dimatikan, HTTPS, dan rahasia HMAC dari secret manager.
 
 ---
 

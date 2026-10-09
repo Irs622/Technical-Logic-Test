@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 class App(
     val db: Db = Db.fresh(),
-    val gateway: MockGateway = MockGateway(),
+    val gateway: MockGateway = MockGateway(System.getenv("GATEWAY_CALLBACK_SECRET") ?: "dev-secret"),
 ) {
     val inv = Inventory(db, gateway)
     val incident = Incident(db, inv, gateway)
