@@ -269,6 +269,32 @@ export MYSQL_URL=jdbc:mysql://localhost:3307/shop MYSQL_USER=root  # opsional, t
 ./gradlew :server:run
 ```
 
+### Contoh konfigurasi `.env` (salin ke terminal atau simpan lokal, jangan di-commit)
+
+```bash
+# ---- Wajib untuk build ----
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"   # JDK 17+
+
+# ---- Server ----
+export PORT=8080
+
+# ---- Database: hapus/komentari 3 baris berikut untuk memakai H2 in-memory (bawaan) ----
+export MYSQL_URL="jdbc:mysql://localhost:3307/shop"
+export MYSQL_USER="root"
+# MYSQL_PASSWORD  -> tambahkan hanya bila MySQL Anda memakai password
+
+# ---- Opsional ----
+# export ALERT_WEBHOOK_URL="https://hooks.example.com/oncall"   # alert invariant dilanggar
+# export GATEWAY_CALLBACK_SECRET="ganti-dengan-nilai-acak"      # kunci HMAC callback gateway tiruan
+```
+
+Muat lalu jalankan:
+```bash
+set -a; source .env; set +a      # asumsi file bernama .env di root proyek
+./gradlew :server:run
+```
+File `.env` sudah ada di `.gitignore`, jadi aman bila disimpan lokal.
+
 ### Parameter yang diatur lewat API (tanpa restart)
 
 | Parameter | Cara mengubah | Default |
